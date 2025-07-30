@@ -141,16 +141,25 @@ def load_station_data(station):
         st.error(f"Error loading data for {station}: {e}")
         return None
 
-def calculate_power_factor(active_power, reactive_power, apparent_power):
-    """Calculate power factor from power components"""
-    if apparent_power and apparent_power != 0:
-        return abs(active_power) / apparent_power
-    elif active_power and reactive_power:
-        # Calculate from active and reactive power
-        apparent = np.sqrt(active_power**2 + reactive_power**2)
-        if apparent != 0:
-            return abs(active_power) / apparent
-    return None
+def calculate_power_factor(df):
+    """Calculate power factor as Active Power / Apparent Power"""
+    if df is None or df.empty:
+        return pd.Series()
+    
+    # Get active power and apparent power columns
+    active_power = df.get('PowerP_Total_avg', pd.Series())
+    apparent_power = df.get('PowerS_Total_avg', pd.Series())
+    
+    # Calculate power factor: PF = Active Power / Apparent Power
+    if not active_power.empty and not apparent_power.empty:
+        # Avoid division by zero
+        power_factor = active_power / apparent_power
+        # Replace infinite values and NaN with 0
+        power_factor = power_factor.replace([np.inf, -np.inf], 0)
+        power_factor = power_factor.fillna(0)
+        return power_factor
+    
+    return pd.Series()
 
 def filter_daytime_data(df):
     """Filter data for daytime hours (5:01 AM to 8:59 PM)"""
@@ -176,18 +185,53 @@ def filter_nighttime_data(df):
     )
     return df[nighttime_mask]
 
+def calculate_total_current(df):
+    """Calculate total current from all phases"""
+    if df is None or df.empty:
+        return pd.Series()
+    
+    # Get all current columns for different phases
+    current_cols = [col for col in df.columns if 'Irms_' in col and 'avg' in col]
+    
+    if not current_cols:
+        return pd.Series()
+    
+    # Sum all phase currents
+    total_current = df[current_cols].sum(axis=1)
+    return total_current
+
+def calculate_total_voltage(df):
+    """Calculate average voltage from all phases"""
+    if df is None or df.empty:
+        return pd.Series()
+    
+    # Get all voltage columns for different phases
+    voltage_cols = [col for col in df.columns if 'Vrms_AN_avg' in col or 'Vrms_BN_avg' in col or 'Vrms_CN_avg' in col]
+    
+    if not voltage_cols:
+        return pd.Series()
+    
+    # Calculate average voltage across all phases
+    avg_voltage = df[voltage_cols].mean(axis=1)
+    return avg_voltage
+
 def calculate_daily_averages(df):
     """Calculate daily averages for KPI metrics"""
     if df is None or df.empty:
         return {}
     
     try:
+        # Calculate total current from all phases
+        total_current = calculate_total_current(df)
+        avg_voltage = calculate_total_voltage(df)
+        power_factor = calculate_power_factor(df)
+        
         # Calculate KPIs directly from the data (not daily averages)
         kpis = {
             'avg_power': df.get('PowerP_Total_avg', pd.Series()).mean(),
-            'avg_pf': df.get('PfFwdRev_Total_avg', pd.Series()).mean(),
-            'avg_voltage': df.get('Vrms_AN_avg', pd.Series()).mean(),
-            'avg_current': df.get('Irms_A_avg', pd.Series()).mean(),
+            'avg_pf': power_factor.mean() if not power_factor.empty else 0,
+            'avg_voltage': avg_voltage.mean() if not avg_voltage.empty else df.get('Vrms_AN_avg', pd.Series()).mean(),
+            'avg_current': total_current.mean() if not total_current.empty else df.get('Irms_A_avg', pd.Series()).mean(),
             'avg_frequency': df.get('Frequency_avg', pd.Series()).mean(),
             'avg_vthd': df.get('Vthd_AN_avg', pd.Series()).mean(),
             'avg_ithd': df.get('Ithd_A_avg', pd.Series()).mean(),
@@ -214,15 +258,25 @@ def calculate_time_based_metrics(df, station):
     
     metrics = {}
     
+    # Calculate total current and voltage for both periods
+    daytime_total_current = calculate_total_current(daytime_df)
+    nighttime_total_current = calculate_total_current(nighttime_df)
+    daytime_avg_voltage = calculate_total_voltage(daytime_df)
+    nighttime_avg_voltage = calculate_total_voltage(nighttime_df)
+    
+    # Calculate power factor for both periods
+    daytime_pf = calculate_power_factor(daytime_df)
+    nighttime_pf = calculate_power_factor(nighttime_df)
+    
     # Daytime metrics
     if not daytime_df.empty:
         metrics['daytime'] = {
             'peak_power': daytime_df.get('PowerP_Total_avg', pd.Series()).max() / 1000,  # Convert to kW
             'min_power': daytime_df.get('PowerP_Total_avg', pd.Series()).min() / 1000,   # Convert to kW
             'avg_power': daytime_df.get('PowerP_Total_avg', pd.Series()).mean() / 1000,  # Convert to kW
-            'avg_pf': daytime_df.get('PfFwdRev_Total_avg', pd.Series()).mean(),
-            'avg_voltage': daytime_df.get('Vrms_AN_avg', pd.Series()).mean(),
-            'avg_current': daytime_df.get('Irms_A_avg', pd.Series()).mean(),
+            'avg_pf': daytime_pf.mean() if not daytime_pf.empty else 0,
+            'avg_voltage': daytime_avg_voltage.mean() if not daytime_avg_voltage.empty else daytime_df.get('Vrms_AN_avg', pd.Series()).mean(),
+            'avg_current': daytime_total_current.mean() if not daytime_total_current.empty else daytime_df.get('Irms_A_avg', pd.Series()).mean(),
             'data_points': len(daytime_df)
         }
     
@@ -232,9 +286,9 @@ def calculate_time_based_metrics(df, station):
             'peak_power': nighttime_df.get('PowerP_Total_avg', pd.Series()).max() / 1000,  # Convert to kW
             'min_power': nighttime_df.get('PowerP_Total_avg', pd.Series()).min() / 1000,   # Convert to kW
             'avg_power': nighttime_df.get('PowerP_Total_avg', pd.Series()).mean() / 1000,  # Convert to kW
-            'avg_pf': nighttime_df.get('PfFwdRev_Total_avg', pd.Series()).mean(),
-            'avg_voltage': nighttime_df.get('Vrms_AN_avg', pd.Series()).mean(),
-            'avg_current': nighttime_df.get('Irms_A_avg', pd.Series()).mean(),
+            'avg_pf': nighttime_pf.mean() if not nighttime_pf.empty else 0,
+            'avg_voltage': nighttime_avg_voltage.mean() if not nighttime_avg_voltage.empty else nighttime_df.get('Vrms_AN_avg', pd.Series()).mean(),
+            'avg_current': nighttime_total_current.mean() if not nighttime_total_current.empty else nighttime_df.get('Irms_A_avg', pd.Series()).mean(),
             'data_points': len(nighttime_df)
         }
     
@@ -449,14 +503,15 @@ def create_power_factor_chart(df, station):
     
     fig = go.Figure()
     
-    # Add power factor data
-    pf_cols = [col for col in df.columns if 'PfFwdRev' in col and 'avg' in col]
-    for col in pf_cols:
+    # Calculate power factor using the correct formula
+    power_factor = calculate_power_factor(df)
+    
+    if not power_factor.empty:
         fig.add_trace(go.Scatter(
             x=df.index,
-            y=df[col],
+            y=power_factor,
             mode='lines',
-            name=col.replace('_avg', ''),
+            name='Power Factor (Active/Apparent)',
             line=dict(color='blue', width=2)
         ))
     
@@ -465,7 +520,7 @@ def create_power_factor_chart(df, station):
                   annotation_text="Recommended (0.9)")
     
     fig.update_layout(
-        title=f'{station.title()} Station - Power Factor Analysis',
+        title=f'{station.title()} Station - Power Factor Analysis (Active/Apparent Power)',
         xaxis_title='Time',
         yaxis_title='Power Factor',
         height=400,
