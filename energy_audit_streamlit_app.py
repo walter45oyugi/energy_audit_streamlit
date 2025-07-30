@@ -7,6 +7,7 @@ import numpy as np
 from pathlib import Path
 import os
 import base64
+from datetime import time
 
 # Page configuration
 st.set_page_config(
@@ -140,6 +141,41 @@ def load_station_data(station):
         st.error(f"Error loading data for {station}: {e}")
         return None
 
+def calculate_power_factor(active_power, reactive_power, apparent_power):
+    """Calculate power factor from power components"""
+    if apparent_power and apparent_power != 0:
+        return abs(active_power) / apparent_power
+    elif active_power and reactive_power:
+        # Calculate from active and reactive power
+        apparent = np.sqrt(active_power**2 + reactive_power**2)
+        if apparent != 0:
+            return abs(active_power) / apparent
+    return None
+
+def filter_daytime_data(df):
+    """Filter data for daytime hours (5:01 AM to 8:59 PM)"""
+    if df is None or df.empty:
+        return df
+    
+    # Create time filter for daytime (5:01 AM to 8:59 PM)
+    daytime_mask = (
+        (df.index.time >= time(5, 1)) & 
+        (df.index.time <= time(20, 59))
+    )
+    return df[daytime_mask]
+
+def filter_nighttime_data(df):
+    """Filter data for nighttime hours (9:00 PM to 5:00 AM)"""
+    if df is None or df.empty:
+        return df
+    
+    # Create time filter for nighttime (9:00 PM to 5:00 AM)
+    nighttime_mask = (
+        (df.index.time >= time(21, 0)) | 
+        (df.index.time <= time(5, 0))
+    )
+    return df[nighttime_mask]
+
 def calculate_daily_averages(df):
     """Calculate daily averages for KPI metrics"""
     if df is None or df.empty:
@@ -166,6 +202,43 @@ def calculate_daily_averages(df):
     except Exception as e:
         st.error(f"Error calculating averages: {e}")
         return {}
+
+def calculate_time_based_metrics(df, station):
+    """Calculate metrics for daytime and nighttime periods"""
+    if df is None or df.empty:
+        return {}
+    
+    # Filter data for different time periods
+    daytime_df = filter_daytime_data(df)
+    nighttime_df = filter_nighttime_data(df)
+    
+    metrics = {}
+    
+    # Daytime metrics
+    if not daytime_df.empty:
+        metrics['daytime'] = {
+            'peak_power': daytime_df.get('PowerP_Total_avg', pd.Series()).max() / 1000,  # Convert to kW
+            'min_power': daytime_df.get('PowerP_Total_avg', pd.Series()).min() / 1000,   # Convert to kW
+            'avg_power': daytime_df.get('PowerP_Total_avg', pd.Series()).mean() / 1000,  # Convert to kW
+            'avg_pf': daytime_df.get('PfFwdRev_Total_avg', pd.Series()).mean(),
+            'avg_voltage': daytime_df.get('Vrms_AN_avg', pd.Series()).mean(),
+            'avg_current': daytime_df.get('Irms_A_avg', pd.Series()).mean(),
+            'data_points': len(daytime_df)
+        }
+    
+    # Nighttime metrics
+    if not nighttime_df.empty:
+        metrics['nighttime'] = {
+            'peak_power': nighttime_df.get('PowerP_Total_avg', pd.Series()).max() / 1000,  # Convert to kW
+            'min_power': nighttime_df.get('PowerP_Total_avg', pd.Series()).min() / 1000,   # Convert to kW
+            'avg_power': nighttime_df.get('PowerP_Total_avg', pd.Series()).mean() / 1000,  # Convert to kW
+            'avg_pf': nighttime_df.get('PfFwdRev_Total_avg', pd.Series()).mean(),
+            'avg_voltage': nighttime_df.get('Vrms_AN_avg', pd.Series()).mean(),
+            'avg_current': nighttime_df.get('Irms_A_avg', pd.Series()).mean(),
+            'data_points': len(nighttime_df)
+        }
+    
+    return metrics
 
 def create_frequency_chart(df, station):
     """Create frequency analysis chart"""
@@ -543,6 +616,7 @@ def show_station_analysis(station, station_name):
     # Load data
     df = load_station_data(station)
     kpis = calculate_daily_averages(df)
+    time_metrics = calculate_time_based_metrics(df, station)
     
     if df is None or df.empty:
         st.error(f"No data available for {station_name} Station")
@@ -563,6 +637,32 @@ def show_station_analysis(station, station_name):
     with col4:
         st.metric("Average Current", f"{kpis.get('avg_current', 0):.1f} A")
     
+    # Day/Night Time Analysis
+    if time_metrics:
+        st.markdown("### Day/Night Time Analysis (5:01 AM - 8:59 PM)")
+        
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            st.markdown("#### Daytime Metrics (5:01 AM - 8:59 PM)")
+            if 'daytime' in time_metrics:
+                daytime = time_metrics['daytime']
+                st.metric("Peak Power", f"{daytime.get('peak_power', 0):.1f} kW")
+                st.metric("Min Power", f"{daytime.get('min_power', 0):.1f} kW")
+                st.metric("Average Power", f"{daytime.get('avg_power', 0):.1f} kW")
+                st.metric("Average Power Factor", f"{daytime.get('avg_pf', 0):.2f}")
+                st.metric("Data Points", f"{daytime.get('data_points', 0)}")
+        
+        with col2:
+            st.markdown("#### Nighttime Metrics (9:00 PM - 5:00 AM)")
+            if 'nighttime' in time_metrics:
+                nighttime = time_metrics['nighttime']
+                st.metric("Peak Power", f"{nighttime.get('peak_power', 0):.1f} kW")
+                st.metric("Min Power", f"{nighttime.get('min_power', 0):.1f} kW")
+                st.metric("Average Power", f"{nighttime.get('avg_power', 0):.1f} kW")
+                st.metric("Average Power Factor", f"{nighttime.get('avg_pf', 0):.2f}")
+                st.metric("Data Points", f"{nighttime.get('data_points', 0)}")
+    
     # Analysis tabs
     tab1, tab2, tab3, tab4, tab5 = st.tabs([
         "Power Quality", "Voltage", "Current", "Harmonics", "Power Factor"
@@ -575,7 +675,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Frequency Analysis")
         freq_fig = create_frequency_chart(df, station)
         if freq_fig:
-            st.plotly_chart(freq_fig, use_container_width=True)
+            st.plotly_chart(freq_fig, use_container_width=True, key=f"freq_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>📊 Frequency Insights</h6>
@@ -587,7 +687,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Voltage THD Analysis")
         vthd_fig = create_voltage_thd_chart(df, station)
         if vthd_fig:
-            st.plotly_chart(vthd_fig, use_container_width=True)
+            st.plotly_chart(vthd_fig, use_container_width=True, key=f"vthd_pq_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>⚡ Voltage THD Insights</h6>
@@ -602,7 +702,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Line-to-Neutral Voltage Analysis")
         vln_fig = create_voltage_analysis_chart(df, station)
         if vln_fig:
-            st.plotly_chart(vln_fig, use_container_width=True)
+            st.plotly_chart(vln_fig, use_container_width=True, key=f"vln_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>⚡ Line-to-Neutral Voltage Insights</h6>
@@ -614,7 +714,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Line-to-Line Voltage Analysis")
         vll_fig = create_line_to_line_voltage_chart(df, station)
         if vll_fig:
-            st.plotly_chart(vll_fig, use_container_width=True)
+            st.plotly_chart(vll_fig, use_container_width=True, key=f"vll_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>⚡ Line-to-Line Voltage Insights</h6>
@@ -629,7 +729,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Current Distribution")
         current_fig = create_current_analysis_chart(df, station)
         if current_fig:
-            st.plotly_chart(current_fig, use_container_width=True)
+            st.plotly_chart(current_fig, use_container_width=True, key=f"current_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>⚖️ Current Distribution Insights</h6>
@@ -641,7 +741,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Current THD Analysis")
         ithd_fig = create_current_thd_chart(df, station)
         if ithd_fig:
-            st.plotly_chart(ithd_fig, use_container_width=True)
+            st.plotly_chart(ithd_fig, use_container_width=True, key=f"ithd_current_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>📊 Current THD Insights</h6>
@@ -656,7 +756,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Voltage THD Analysis")
         vthd_fig = create_voltage_thd_chart(df, station)
         if vthd_fig:
-            st.plotly_chart(vthd_fig, use_container_width=True)
+            st.plotly_chart(vthd_fig, use_container_width=True, key=f"vthd_harmonics_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>⚡ Voltage Harmonics Insights</h6>
@@ -668,7 +768,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Current THD Analysis")
         ithd_fig = create_current_thd_chart(df, station)
         if ithd_fig:
-            st.plotly_chart(ithd_fig, use_container_width=True)
+            st.plotly_chart(ithd_fig, use_container_width=True, key=f"ithd_harmonics_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>📊 Current Harmonics Insights</h6>
@@ -683,7 +783,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Power Factor Analysis")
         pf_fig = create_power_factor_chart(df, station)
         if pf_fig:
-            st.plotly_chart(pf_fig, use_container_width=True)
+            st.plotly_chart(pf_fig, use_container_width=True, key=f"pf_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>📉 Power Factor Insights</h6>
@@ -695,7 +795,7 @@ def show_station_analysis(station, station_name):
         st.markdown("#### Active Power Analysis")
         power_fig = create_active_power_chart(df, station)
         if power_fig:
-            st.plotly_chart(power_fig, use_container_width=True)
+            st.plotly_chart(power_fig, use_container_width=True, key=f"power_{station}")
             st.markdown("""
             <div class="insight-box">
                 <h6>⚡ Active Power Insights</h6>
